@@ -1,5 +1,5 @@
-#include "pch.h"
 #include "include\UtilsStaticLib\EncryptionUtils.h"
+
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -60,6 +60,14 @@ std::string getUserIdFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojs
 std::string getUsernameFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded) {
     if (decoded.has_payload_claim("username")) {
         return decoded.get_payload_claim("username").as_string();
+    }
+    return "";
+}
+
+std::string getCharIdFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded)
+{
+    if (decoded.has_payload_claim("charId")) {
+        return decoded.get_payload_claim("charId").as_string();
     }
     return "";
 }

@@ -29,6 +29,7 @@ std::string GenerateToken(const std::unordered_map<std::string, std::string>& pa
 
 std::string getUserIdFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded);
 std::string getUsernameFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded);
+std::string getCharIdFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded);
 std::string readKeyFile(const std::string& path);
 TokenVerificationResult validateAndExtractClaims(const std::string& token);
 

@@ -1,5 +1,4 @@
-﻿  pch.cpp
-  EncryptionUtils.cpp
+﻿  EncryptionUtils.cpp
 C:\Users\Sagi\vcpkg\installed\x64-windows\include\jwt-cpp\jwt.h(2022,48): warning C4244: 'argument': conversion from '_Ty1' to 'const unsigned int', possible loss of data
           with
           [
@@ -32,6 +31,4 @@ C:\Users\Sagi\vcpkg\installed\x64-windows\include\jwt-cpp\jwt.h(2178): message :
 C:\Users\Sagi\vcpkg\installed\x64-windows\include\jwt-cpp\jwt.h(2394): message : see reference to function template instantiation 'jwt::date jwt::basic_claim<jwt::traits::kazuho_picojson>::as_date(void) const' being compiled
 C:\Users\Sagi\vcpkg\installed\x64-windows\include\jwt-cpp\jwt.h(3207): message : see reference to class template instantiation 'jwt::basic_claim<jwt::traits::kazuho_picojson>' being compiled
 C:\Users\Sagi\vcpkg\installed\x64-windows\include\jwt-cpp\traits\kazuho-picojson\defaults.h(19): message : see reference to class template instantiation 'jwt::verifier<jwt::default_clock,jwt::traits::kazuho_picojson>' being compiled
-  UtilsStaticLib.cpp
-  Generating Code...
   UtilsStaticLib.vcxproj -> C:\Users\Sagi\source\repos\UtilsStaticLib\Debug\UtilsStaticLib.lib

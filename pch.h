@@ -10,9 +10,6 @@
 // add headers that you want to pre-compile here
 #pragma once
 
-#include <iostream>
-#include <string>
-#include <vector>
-#include <random>
+
 
 #endif //PCH_H
