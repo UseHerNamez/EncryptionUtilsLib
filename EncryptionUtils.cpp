@@ -1,13 +1,34 @@
-#include "include\UtilsStaticLib\EncryptionUtils.h"
+// EncryptionUtils.cpp
+#include "EncryptionUtils.h"
 
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <limits>   // for std::numeric_limits
+
+// third party - only in the .cpp
+#pragma warning(push, 0)
+#include <jwt-cpp/jwt.h>
+#include <nlohmann/json.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/ini_parser.hpp>
+#pragma warning(pop)
+
+// OpenSSL
+#include <openssl/evp.h>
+#include <openssl/err.h>
+#include <openssl/bio.h>
 
 #define _CRT_SECURE_NO_WARNINGS
 
+// --- file helpers ---
+
 std::string readKeyFile(const std::string& filename) {
-    std::ifstream file(filename);
+    std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         std::cerr << "Failed to open key file: " << filename << std::endl;
-        return "";
+        return {};
     }
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -16,196 +37,232 @@ std::string readKeyFile(const std::string& filename) {
     return key;
 }
 
+// --- token helpers ---
+
 std::string GenerateToken(const std::unordered_map<std::string, std::string>& payloadClaims,
     std::chrono::seconds expiresIn)
 {
-    std::string privateKey = readKeyFile("private.pem");
-    std::string publicKey = readKeyFile("public.pem");
-
+    const std::string privateKey = readKeyFile("private.pem");
+    const std::string publicKey = readKeyFile("public.pem");
     if (privateKey.empty() || publicKey.empty()) {
         std::cerr << "Keys could not be loaded.\n";
-        return "";
+        return {};
     }
 
     try {
-        auto alg = jwt::algorithm::rs256(publicKey, privateKey, "", "");
-        auto now = std::chrono::system_clock::now();
+        const auto alg = jwt::algorithm::rs256(publicKey, privateKey, "", "");
+        const auto now = std::chrono::system_clock::now();
 
-        auto tokenBuilder = jwt::create()
-            .set_issuer(Authenticator)
+        auto builder = jwt::create()
+            .set_issuer(std::string(Authenticator))
             .set_type("JWT")
             .set_issued_at(now)
             .set_expires_at(now + expiresIn);
 
-        // Add all dynamic claims
-        for (const std::pair<const std::string, std::string>& pair : payloadClaims) {
-            tokenBuilder.set_payload_claim(pair.first, jwt::claim(pair.second));
+        for (const auto& kv : payloadClaims) {
+            builder.set_payload_claim(kv.first, jwt::claim(kv.second));
         }
-
-        return tokenBuilder.sign(alg);
+        return builder.sign(alg);
     }
     catch (const std::exception& e) {
         std::cerr << "JWT generation failed: " << e.what() << std::endl;
-        return "";
+        return {};
     }
 }
 
-std::string getUserIdFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded) {
-    if (decoded.has_payload_claim("userId")) {
-        return decoded.get_payload_claim("userId").as_string();
-    }
-    return "";
-}
-
-std::string getUsernameFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded) {
-    if (decoded.has_payload_claim("username")) {
-        return decoded.get_payload_claim("username").as_string();
-    }
-    return "";
-}
-
-std::string getCharIdFromToken(const jwt::decoded_jwt<jwt::traits::kazuho_picojson>& decoded)
+static TokenVerificationResult VerifyAndDecode(const std::string& token)
 {
-    if (decoded.has_payload_claim("charId")) {
-        return decoded.get_payload_claim("charId").as_string();
-    }
-    return "";
-}
-
-TokenVerificationResult validateAndExtractClaims(const std::string& token) {
-    std::string publicKey = readKeyFile("public.pem");
+    const std::string publicKey = readKeyFile("public.pem");
     if (publicKey.empty()) {
-        std::cerr << "Failed to read public key." << std::endl;
-        return { TokenStatus::Invalid, boost::none };  // Public key error
+        return { TokenStatus::Invalid, std::nullopt, "no_public_key" };
     }
+
     try {
-        // Decode the token without verification to inspect the claims
-        auto decoded = jwt::decode(token);
-        // Verify the token (signature, issuer, expiration, etc.)
+        const auto decoded = jwt::decode(token);
         auto verifier = jwt::verify()
             .allow_algorithm(jwt::algorithm::rs256(publicKey, "", "", ""))
-            .with_issuer(Authenticator)
-            .leeway(30);
+            .with_issuer(std::string(Authenticator))
+            .leeway(30); // seconds
 
-        // Verify the decoded token
         verifier.verify(decoded);
 
-        // Token is valid, return the decoded JWT
-        return { TokenStatus::Valid, decoded };
-    }
-    catch (const std::exception& e) {  // Catch general C++ exception
-        std::cout << "Token verification failed: " << e.what() << std::endl;
+        TokenClaims c;
+        if (decoded.has_payload_claim("userId"))   c.userId = decoded.get_payload_claim("userId").as_string();
+        if (decoded.has_payload_claim("username")) c.username = decoded.get_payload_claim("username").as_string();
+        if (decoded.has_payload_claim("charId"))   c.charId = decoded.get_payload_claim("charId").as_string();
 
-        // Check if the exception is related to expiration
-        if (std::string(e.what()).find("token is expired") != std::string::npos) {
-            std::cerr << "Token has expired." << std::endl;
-            return { TokenStatus::Expired, boost::none };
+        return { TokenStatus::Valid, TokenClaims{ std::move(c) }, {} };
+    }
+    catch (const std::exception& e) {
+        const std::string msg = e.what();
+        if (msg.find("expired") != std::string::npos) {
+            return { TokenStatus::Expired, std::nullopt, "expired" };
         }
-
-        // If the error is generic verification failure (invalid token, wrong issuer, etc.)
-        return { TokenStatus::Invalid, boost::none };
+        return { TokenStatus::Invalid, std::nullopt, "verify_failed" };
     }
+}
+
+TokenVerificationResult validateAndExtractClaims(const std::string& token)
+{
+    return VerifyAndDecode(token);
+}
+
+// Convenience accessors from a token string
+std::optional<std::string> getUserIdFromToken(const std::string& token) {
+    auto r = VerifyAndDecode(token);
+    return (r.status == TokenStatus::Valid && r.claims) ? std::optional<std::string>(r.claims->userId)
+        : std::nullopt;
+}
+std::optional<std::string> getUsernameFromToken(const std::string& token) {
+    auto r = VerifyAndDecode(token);
+    return (r.status == TokenStatus::Valid && r.claims) ? std::optional<std::string>(r.claims->username)
+        : std::nullopt;
+}
+std::optional<std::string> getCharIdFromToken(const std::string& token) {
+    auto r = VerifyAndDecode(token);
+    return (r.status == TokenStatus::Valid && r.claims) ? std::optional<std::string>(r.claims->charId)
+        : std::nullopt;
+}
+
+// Convenience accessors from a pre-validated result
+std::optional<std::string> getUserId(const TokenVerificationResult& r) {
+    return (r.status == TokenStatus::Valid && r.claims) ? std::optional<std::string>(r.claims->userId)
+        : std::nullopt;
+}
+std::optional<std::string> getUsername(const TokenVerificationResult& r) {
+    return (r.status == TokenStatus::Valid && r.claims) ? std::optional<std::string>(r.claims->username)
+        : std::nullopt;
+}
+std::optional<std::string> getCharId(const TokenVerificationResult& r) {
+    return (r.status == TokenStatus::Valid && r.claims) ? std::optional<std::string>(r.claims->charId)
+        : std::nullopt;
+}
+
+// --- OpenSSL helpers ---
+
+static std::string getOpenSSLError() {
+    BIO* bio = BIO_new(BIO_s_mem());
+    ERR_print_errors(bio);
+    char* buf = nullptr;
+    const long len = BIO_get_mem_data(bio, &buf);
+    std::string ret;
+    if (len > 0 && buf) ret.assign(buf, static_cast<size_t>(len));
+    BIO_free(bio);
+    return ret;
 }
 
 std::string encrypt(const std::string& plaintext, const std::string& key)
 {
     OpenSSL_add_all_algorithms();
 
-    // Set up the cipher context
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        std::cerr << "Failed to create cipher context." << std::endl;
-        return "";
+    if (!ctx) { std::cerr << "Failed to create cipher context.\n"; return {}; }
+
+    if (plaintext.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        std::cerr << "Plaintext too large for OpenSSL.\n"; EVP_CIPHER_CTX_free(ctx); return {};
     }
 
-    // Initialize encryption operation
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr, reinterpret_cast<const unsigned char*>(key.c_str()), reinterpret_cast<const unsigned char*>(IV.c_str())) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        std::cerr << "Failed to initialize encryption operation." << std::endl;
-        return "";
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr,
+        reinterpret_cast<const unsigned char*>(key.data()),
+        reinterpret_cast<const unsigned char*>(IV.data())) != 1) {
+        EVP_CIPHER_CTX_free(ctx); std::cerr << "Failed to initialize encryption.\n"; return {};
     }
 
-    // Provide the message to be encrypted, and obtain the encrypted output
-    std::string ciphertext;
-    ciphertext.resize(plaintext.size() + EVP_CIPHER_block_size(EVP_aes_128_cbc()));
-    int ciphertextLength = 0;
+    const size_t cap = plaintext.size()
+        + static_cast<size_t>(EVP_CIPHER_block_size(EVP_aes_128_cbc()));
+    std::string ciphertext(cap, '\0');
 
-    if (EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char*>(&ciphertext[0]), &ciphertextLength, reinterpret_cast<const unsigned char*>(plaintext.c_str()), plaintext.size()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        std::cerr << "Failed to perform encryption update." << std::endl;
-        return "";
+    int outLen = 0;
+    if (EVP_EncryptUpdate(ctx,
+        reinterpret_cast<unsigned char*>(&ciphertext[0]), &outLen,
+        reinterpret_cast<const unsigned char*>(plaintext.data()),
+        static_cast<int>(plaintext.size())) != 1) {
+        EVP_CIPHER_CTX_free(ctx); std::cerr << "EncryptUpdate failed.\n"; return {};
     }
 
-    // Finalize the encryption
-    int finalLength = 0;
-    if (EVP_EncryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(&ciphertext[ciphertextLength]), &finalLength) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        std::cerr << "Failed to finalize encryption." << std::endl;
-        return "";
+    int finalLen = 0;
+    if (EVP_EncryptFinal_ex(ctx,
+        reinterpret_cast<unsigned char*>(&ciphertext[outLen]), &finalLen) != 1) {
+        std::cerr << "EncryptFinal failed: " << getOpenSSLError() << "\n";
+        EVP_CIPHER_CTX_free(ctx); return {};
     }
-
-    ciphertextLength += finalLength;
     EVP_CIPHER_CTX_free(ctx);
 
-    // Resize the ciphertext to the actual length
-    ciphertext.resize(ciphertextLength);
-
+    const size_t total = static_cast<size_t>(outLen) + static_cast<size_t>(finalLen);
+    ciphertext.resize(total);
     return ciphertext;
 }
 
-// Convert OpenSSL error codes to human-readable string
-std::string getOpenSSLError() {
-    BIO* bio = BIO_new(BIO_s_mem());
-    ERR_print_errors(bio);
-    char* buf;
-    size_t len = BIO_get_mem_data(bio, &buf);
-    std::string ret(buf, len);
-    BIO_free(bio);
-    return ret;
-}
 
 std::string decrypt(const std::string& ciphertext, const std::string& key)
 {
     OpenSSL_add_all_algorithms();
 
-    // Set up the cipher context
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        std::cerr << "Failed to create cipher context." << std::endl;
-        return "";
+    if (!ctx) { std::cerr << "Failed to create cipher context.\n"; return {}; }
+
+    if (ciphertext.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        std::cerr << "Ciphertext too large for OpenSSL.\n"; EVP_CIPHER_CTX_free(ctx); return {};
     }
 
-    // Initialize decryption operation
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr, reinterpret_cast<const unsigned char*>(key.c_str()), reinterpret_cast<const unsigned char*>(IV.c_str())) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        std::cerr << "Failed to initialize decryption operation." << std::endl;
-        return "";
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr,
+        reinterpret_cast<const unsigned char*>(key.data()),
+        reinterpret_cast<const unsigned char*>(IV.data())) != 1) {
+        EVP_CIPHER_CTX_free(ctx); std::cerr << "Failed to initialize decryption.\n"; return {};
     }
 
-    // Provide the message to be decrypted, and obtain the decrypted output
-    std::string decryptedtext;
-    decryptedtext.resize(ciphertext.size() + EVP_CIPHER_block_size(EVP_aes_128_cbc()));
-    int decryptedLength = 0;
+    const size_t cap = ciphertext.size()
+        + static_cast<size_t>(EVP_CIPHER_block_size(EVP_aes_128_cbc()));
+    std::string plain(cap, '\0');
 
-    if (EVP_DecryptUpdate(ctx, reinterpret_cast<unsigned char*>(&decryptedtext[0]), &decryptedLength, reinterpret_cast<const unsigned char*>(ciphertext.c_str()), ciphertext.size()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        std::cerr << "Failed to perform decryption update." << std::endl;
-        return "";
+    int outLen = 0;
+    if (EVP_DecryptUpdate(ctx,
+        reinterpret_cast<unsigned char*>(&plain[0]), &outLen,
+        reinterpret_cast<const unsigned char*>(ciphertext.data()),
+        static_cast<int>(ciphertext.size())) != 1) {
+        EVP_CIPHER_CTX_free(ctx); std::cerr << "DecryptUpdate failed.\n"; return {};
     }
 
-    // Finalize the decryption
-    int finalLength = 0;
-    if (EVP_DecryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(&decryptedtext[decryptedLength]), &finalLength) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        std::cerr << "Failed to finalize decryption: " << getOpenSSLError() << std::endl;
-        return "";
+    int finalLen = 0;
+    if (EVP_DecryptFinal_ex(ctx,
+        reinterpret_cast<unsigned char*>(&plain[outLen]), &finalLen) != 1) {
+        const auto e = getOpenSSLError();
+        EVP_CIPHER_CTX_free(ctx); std::cerr << "DecryptFinal failed: " << e << "\n"; return {};
     }
-
-    decryptedLength += finalLength;
     EVP_CIPHER_CTX_free(ctx);
 
-    // Resize the decrypted text to the actual length
-    decryptedtext.resize(decryptedLength);
+    const size_t total = static_cast<size_t>(outLen) + static_cast<size_t>(finalLen);
+    plain.resize(total);
+    return plain;
+}
 
-    return decryptedtext;
+std::string HashPassword(const std::string& password)
+{
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int out_len = 0;
+
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx, password.data(), password.size()) != 1 ||
+        EVP_DigestFinal_ex(ctx, digest, &out_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return "";
+    }
+    EVP_MD_CTX_free(ctx);
+
+    const size_t len = static_cast<size_t>(out_len);
+
+    static const char* lut = "0123456789abcdef";
+    std::string hex;
+    hex.resize(len * static_cast<size_t>(2));
+
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char b = digest[i];
+        const size_t idx = i * static_cast<size_t>(2);
+        hex[idx] = lut[b >> 4];
+        hex[idx + 1] = lut[b & 0x0F];
+    }
+    return hex;
 }
